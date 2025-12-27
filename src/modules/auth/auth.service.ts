@@ -3,36 +3,140 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { CreateAuthDto } from './dto/create-auth.dto';
 import { UpdateAuthDto } from './dto/update-auth.dto';
 import { SmsService } from 'src/services/smsService';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import { LoginAuthDto } from './dto/login-auth.dto';
 @Injectable()
 export class AuthService {
+  private userInfo: any;
   constructor(
+    private readonly jwtService: JwtService,
+    private readonly prisma: PrismaService,
     private readonly smsService: SmsService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
-  create(createAuthDto: CreateAuthDto) {
-    return 'This action adds a new auth';
+  async register(payload: CreateAuthDto) {
+    try {
+      const cleanPhone = payload.phone.replace(/\D/g, '');
+
+      const existingUser = await this.prisma.user.findUnique({
+        where: { phone: cleanPhone },
+      });
+
+      if (existingUser && existingUser.isVerified) {
+        throw new BadRequestException(
+          "Bu telefon raqam allaqachon ro'yxatdan o'tgan",
+        );
+      }
+
+      if (!existingUser) {
+        const hashedPassword = await bcrypt.hash(payload.password, 10);
+        this.userInfo = {
+          ...payload,
+          isVerified: false,
+          password: hashedPassword,
+        };
+      }
+      await this.sendOtp(cleanPhone);
+
+      return {
+        success: true,
+        message: 'Tasdiqlash kodi telefoningizga yuborildi',
+      };
+    } catch (error) {
+      console.log(error);
+      throw new InternalServerErrorException('User register qilishda xatolik');
+    }
   }
 
-  findAll() {
-    return `This action returns all auth`;
+  async login(payload: LoginAuthDto) {
+    try {
+      const existingUser = await this.prisma.user.findUnique({
+        where: { phone: payload.phone },
+      });
+      if (!existingUser) {
+        throw new NotFoundException('User topilmadi');
+      }
+
+      if (!existingUser.isVerified) {
+        throw new UnauthorizedException(
+          'Siz verifikatsiyadan otishingiz kerak',
+        );
+      }
+
+      const pay = { id: existingUser.id, phone: existingUser.phone };
+      const access_token = await this.jwtService.signAsync(pay);
+
+      return {
+        success: true,
+        message: 'User login successfully',
+        token: access_token,
+      };
+    } catch (error) {
+      console.log(error);
+      throw new InternalServerErrorException('Login qilshda xatolik');
+    }
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} auth`;
+  async profile(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        phone: true,
+        firstName: true,
+        lastName: true,
+        isVerified: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User topilmadi');
+    }
+
+    return user;
   }
 
-  update(id: number, updateAuthDto: UpdateAuthDto) {
-    return `This action updates a #${id} auth`;
-  }
+  async update(userId: string, updateAuthDto: UpdateAuthDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
 
-  remove(id: number) {
-    return `This action removes a #${id} auth`;
+    if (!user) {
+      throw new NotFoundException('User topilmadi');
+    }
+
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        firstName: updateAuthDto.firstName,
+        lastName: updateAuthDto.lastName,
+      },
+      select: {
+        id: true,
+        phone: true,
+        firstName: true,
+        lastName: true,
+        isVerified: true,
+        updatedAt: true,
+      },
+    });
+
+    return {
+      success: true,
+      data: updatedUser,
+      message: 'Profil muvaffaqiyatli yangilandi',
+    };
   }
 
   async sendOtp(phone: string) {
@@ -75,6 +179,18 @@ export class AuthService {
     if (savedCode !== userCode) {
       throw new BadRequestException('Tasdiqlash kodi xato');
     }
+
+    const user = await this.prisma.user.create({ data: { ...this.userInfo } });
+
+    if (!user) {
+      throw new NotFoundException('User topilmadi');
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { isVerified: true },
+    });
+
     await this.cacheManager.del(`otp_${cleanPhone}`);
     await this.cacheManager.del(`limit_${cleanPhone}`);
 

@@ -1,16 +1,8 @@
 import { IsString, IsPhoneNumber, IsNotEmpty } from 'class-validator';
 
-export class CreateAuthDto {
+export class LoginAuthDto {
   @IsPhoneNumber('UZ')
   phone: string;
-
-  @IsNotEmpty()
-  @IsString()
-  firstName: string;
-
-  @IsNotEmpty()
-  @IsString()
-  lastName: string;
 
   @IsNotEmpty()
   @IsString()
