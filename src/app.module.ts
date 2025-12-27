@@ -6,6 +6,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule } from './modules/auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { TasksModule } from './tasks/tasks.module';
+import { CacheModule } from '@nestjs/cache-manager';
 
 @Module({
   imports: [
@@ -24,6 +25,10 @@ import { TasksModule } from './tasks/tasks.module';
         },
       }),
       global: true,
+    }),
+    CacheModule.register({
+      isGlobal: true, 
+      store: 'redis', 
     }),
 
     PrismaModule,

@@ -33,8 +33,8 @@ export class SmsService {
           `${this.baseUrl}/message/sms/send`,
           {
             mobile_phone: phone.replace(/\+/g, ''),
-            message: `Sizning tasdiqlash kodingiz: ${code}`,
-            from: '4542',
+            message: `Fixoo platformasidan ro'yxatdan o'tish uchun tasdiqlash kodi: ${code}. Kodni hech kimga bermang!`,
+            from: '4546',
           },
           {
             headers: { Authorization: `Bearer ${this.token}` },

@@ -6,10 +6,7 @@ import { SmsModule } from 'src/services/sms.module';
 import { CacheModule } from '@nestjs/cache-manager';
 
 @Module({
-  imports: [PrismaModule, SmsModule, CacheModule.register({
-      ttl: 0, 
-      isGlobal: false,
-    }),],
+  imports: [PrismaModule, SmsModule],
   controllers: [AuthController],
   providers: [AuthService],
 })

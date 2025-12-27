@@ -25,37 +25,33 @@ export class AuthService {
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
   async register(payload: CreateAuthDto) {
-    try {
-      const cleanPhone = payload.phone.replace(/\D/g, '');
+    const cleanPhone = payload.phone.replace(/\D/g, '');
+    const existingUser = await this.prisma.user.findUnique({
+      where: {
+        phone: `+${cleanPhone.startsWith('998') ? cleanPhone : '998' + cleanPhone}`,
+      },
+    });
 
-      const existingUser = await this.prisma.user.findUnique({
-        where: { phone: cleanPhone },
-      });
-
-      if (existingUser && existingUser.isVerified) {
-        throw new BadRequestException(
-          "Bu telefon raqam allaqachon ro'yxatdan o'tgan",
-        );
-      }
-
-      if (!existingUser) {
-        const hashedPassword = await bcrypt.hash(payload.password, 10);
-        this.userInfo = {
-          ...payload,
-          isVerified: false,
-          password: hashedPassword,
-        };
-      }
-      await this.sendOtp(cleanPhone);
-
-      return {
-        success: true,
-        message: 'Tasdiqlash kodi telefoningizga yuborildi',
-      };
-    } catch (error) {
-      console.log(error);
-      throw new InternalServerErrorException('User register qilishda xatolik');
+    if (existingUser && existingUser.isVerified) {
+      throw new BadRequestException(
+        "Bu telefon raqam allaqachon ro'yxatdan o'tgan",
+      );
     }
+
+    const hashedPassword = await bcrypt.hash(payload.password, 10);
+
+    const pendingUser = {
+      firstName: payload.firstName,
+      lastName: payload.lastName,
+      password: hashedPassword,
+    };
+
+    await this.sendOtp(cleanPhone, pendingUser);
+
+    return {
+      success: true,
+      message: 'Tasdiqlash kodi yuborildi',
+    };
   }
 
   async login(payload: LoginAuthDto) {
@@ -139,29 +135,39 @@ export class AuthService {
     };
   }
 
-  async sendOtp(phone: string) {
+  async sendOtp(phone: string, userData?: any) {
     const cleanPhone = phone.replace(/\D/g, '');
-    const isThrottled = await this.cacheManager.get(`limit_${cleanPhone}`);
-    if (isThrottled) {
-      throw new BadRequestException(
-        "Juda ko'p so'rov yuborildi. Iltimos, 1 daqiqa kuting.",
-      );
-    }
+    const formattedPhone = cleanPhone.startsWith('998')
+      ? `+${cleanPhone}`
+      : `+998${cleanPhone}`;
+
+    const isThrottled = await this.cacheManager.get(`limit_${formattedPhone}`);
+    if (isThrottled) throw new BadRequestException('1 daqiqa kuting');
+
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const cacheKey = `otp_${formattedPhone}`;
 
     try {
-      await this.cacheManager.set(`otp_${cleanPhone}`, otpCode, 120000);
-
-      await this.cacheManager.set(`limit_${cleanPhone}`, true, 60000);
-      await this.smsService.sendOtp(cleanPhone, otpCode);
+      const cacheData = JSON.stringify({
+        code: otpCode,
+        userData: userData || null,
+      });
+      await this.cacheManager.set(cacheKey, cacheData, 120000);
+      const testCheck = await this.cacheManager.get(cacheKey);
+      console.log('HOZIRGINA SAQLANDI:', testCheck);
+      await this.cacheManager.set(`limit_${formattedPhone}`, true, 60000);
+      await this.smsService.sendOtp(formattedPhone, otpCode);
 
       return {
         success: true,
         message: 'Tasdiqlash kodi telefoningizga yuborildi.',
         expiresIn: '2 minutes',
       };
-    } catch (error) {
-      console.error('OTP yuborishda xatolik:', error);
+    } catch (error: any) {
+      console.error(
+        'OTP yuborishda xatolik:',
+        error.response?.data || error.message,
+      );
       throw new InternalServerErrorException(
         'SMS yuborish tizimida xatolik yuz berdi',
       );
@@ -170,33 +176,91 @@ export class AuthService {
 
   async verifyOtp(phone: string, userCode: string) {
     const cleanPhone = phone.replace(/\D/g, '');
+    const formattedPhone = cleanPhone.startsWith('998')
+      ? `+${cleanPhone}`
+      : `+998${cleanPhone}`;
 
-    const savedCode = await this.cacheManager.get<string>(`otp_${cleanPhone}`);
+    const cacheKey = `otp_${formattedPhone}`;
 
-    if (!savedCode) {
-      throw new BadRequestException("Kod muddati o'tgan yoki noto'g'ri raqam");
+    const rawData = await this.cacheManager.get<string>(cacheKey);
+    console.log('KESHDAN KELDI:', rawData);
+
+    if (!rawData) {
+      throw new BadRequestException("Kod topilmadi yoki muddati o'tgan");
     }
-    if (savedCode !== userCode) {
+
+    // 2. Stringni ob'ektga aylantiramiz
+    let parsedData;
+    try {
+      parsedData = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+    } catch (e) {
+      parsedData = rawData;
+    }
+    if (!parsedData) {
+      throw new BadRequestException("Kod muddati o'tgan yoki xato raqam");
+    }
+
+    console.log(parsedData.code);
+    if (parsedData.code !== userCode) {
       throw new BadRequestException('Tasdiqlash kodi xato');
     }
 
-    const user = await this.prisma.user.create({ data: { ...this.userInfo } });
-
+    let user = await this.prisma.user.findUnique({
+      where: { phone: formattedPhone },
+    });
     if (!user) {
-      throw new NotFoundException('User topilmadi');
+      if (!parsedData.userData) {
+        throw new BadRequestException(
+          "Foydalanuvchi ma'lumotlari topilmadi, qaytadan ro'yxatdan o'ting",
+        );
+      }
+
+      user = await this.prisma.user.create({
+        data: {
+          phone: formattedPhone,
+          isVerified: true,
+          firstName: parsedData.userData.firstName,
+          lastName: parsedData.userData.lastName,
+          password: parsedData.userData.password,
+        },
+      });
+    } else {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { isVerified: true },
+      });
     }
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { isVerified: true },
-    });
-
-    await this.cacheManager.del(`otp_${cleanPhone}`);
-    await this.cacheManager.del(`limit_${cleanPhone}`);
+    await this.cacheManager.del(`otp_${formattedPhone}`);
+    await this.cacheManager.del(`limit_${formattedPhone}`);
 
     return {
       success: true,
       message: 'Telefon raqamingiz muvaffaqiyatli tasdiqlandi',
     };
+  }
+
+  async logout(token: string) {
+    if (!token) throw new UnauthorizedException('Token mavjud emas');
+
+    try {
+      const decoded: any = await this.jwtService.decode(token);
+      if (!decoded?.exp) {
+        throw new UnauthorizedException('Token yaroqsiz');
+      }
+      const ttl = decoded.exp * 1000 - Date.now();
+      const ttlSeconds = Math.floor(ttl / 1000);
+
+      if (ttlSeconds > 0) {
+        await this.cacheManager.set(`bl_${token}`, true, ttlSeconds);
+      }
+
+      return {
+        success: true,
+        message: 'Siz muvaffaqiyatli logout qilindingiz',
+      };
+    } catch (error) {
+      throw new UnauthorizedException('Tokenni logout qilishda xatolik');
+    }
   }
 }
